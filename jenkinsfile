@@ -1,44 +1,40 @@
 pipeline {
     agent any
 
-    // === Change these tool names to match Manage Jenkins -> Global Tool Configuration ===
-    tools {
-        jdk 'JDK11'    // replace if your JDK tool name is different
-        maven 'M3'     // replace if your Maven tool name is different
-    }
-
     environment {
         SERVER_IP    = '13.233.101.118'
-        SSH_CRED_ID  = 'node-app-key'                         // Jenkins SSH credential id (private key)
+        SSH_CRED_ID  = 'node-app-key'                           // Jenkins credential id for SSH key
         DEPLOY_PATH  = '/var/lib/tomcat/webapps/ROOT/car-rental'
         REPO_URL     = 'https://github.com/dalvipiyush07/CarRentalApplication.java-CI-CD.git'
         BRANCH       = 'main'
-        SSH_USER     = 'ubuntu'                               // change if needed
+        SSH_USER     = 'ubuntu'
         MAVEN_OPTS   = '-Xmx1g -XX:+UseG1GC'
     }
 
     options {
-        // keep only last 10 builds to save disk
         buildDiscarder(logRotator(numToKeepStr: '10'))
-        // timestamps in console
-        timestamps()
-        // make pipeline fail fast on agent loss
-        ansiColor('xterm')
+        // intentionally NOT using timestamps() or ansiColor() to avoid plugin/version issues
     }
 
     stages {
+        stage('Check Agent Tools') {
+            steps {
+                echo 'Checking for java and mvn on agent (must be installed or in PATH)'
+                sh 'java -version || true'
+                sh 'mvn -version || true'
+            }
+        }
+
         stage('Checkout') {
             steps {
-                echo "Checking out ${BRANCH} from ${REPO_URL}"
-                // if repo is private and needs credentials, use: git credentialsId: 'cred-id', url: REPO_URL, branch: BRANCH
+                echo "Checkout ${BRANCH} from ${REPO_URL}"
                 git branch: "${BRANCH}", url: "${REPO_URL}"
             }
         }
 
         stage('Build') {
             steps {
-                echo 'Running mvn clean package (skip tests by default)'
-                // run in batch mode, skip tests to speed up CI; change if you want tests in this stage
+                echo 'Building with Maven (skip tests to speed up by default)'
                 sh 'mvn -B clean package -DskipTests'
             }
             post {
@@ -50,13 +46,12 @@ pipeline {
 
         stage('Test') {
             steps {
-                echo 'Running unit tests (if any)'
-                // run tests (remove -DskipTests above to include tests in Build), here we run tests separately
+                echo 'Running tests (non-fatal)'
+                // run tests but do not fail pipeline on non-zero; junit will still record results
                 sh 'mvn -B test || true'
             }
             post {
                 always {
-                    // allowEmptyResults true prevents pipeline from failing if no reports found
                     junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
                 }
             }
@@ -65,61 +60,45 @@ pipeline {
         stage('Deploy') {
             steps {
                 script {
-                    // Use sshagent to pick up the private key credential stored in Jenkins
-                    sshagent (credentials: [SSH_CRED_ID]) {
-                        // Use a heredoc to make quoting and multiline SSH easier and more robust
+                    sshagent (credentials: [env.SSH_CRED_ID]) {
                         sh """
                             set -e
-                            echo "Copying artifact to remote server ${SERVER_IP}..."
+                            echo "Copying artifact..."
                             scp -o StrictHostKeyChecking=no target/*.jar ${SSH_USER}@${SERVER_IP}:/tmp/
-
-                            echo "Connecting to ${SERVER_IP} to move and start the app..."
+                            echo "Deploying on remote..."
                             ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SERVER_IP} << 'ENDSSH'
                                 set -e
-                                echo "Creating deploy directory if not exists: ${DEPLOY_PATH}"
                                 sudo mkdir -p ${DEPLOY_PATH}
                                 sudo chown ${SSH_USER}:${SSH_USER} ${DEPLOY_PATH} || true
 
-                                echo "Stopping any running instance (if exists)..."
-                                # try to stop by name; adjust match pattern if necessary
                                 pid=\$(pgrep -f "car-rental" || true)
                                 if [ -n "\$pid" ]; then
-                                    echo "Found running process \$pid, killing..."
+                                    echo "Stopping previous process \$pid"
                                     sudo pkill -f "car-rental" || true
-                                    sleep 3
+                                    sleep 2
                                 fi
 
-                                echo "Moving new jar into place..."
                                 sudo mv /tmp/*.jar ${DEPLOY_PATH}/app.jar
-
-                                # ensure proper permissions
                                 sudo chown ${SSH_USER}:${SSH_USER} ${DEPLOY_PATH}/app.jar || true
                                 cd ${DEPLOY_PATH}
-
-                                echo "Starting app (nohup)..."
-                                # redirect logs and run in background
                                 nohup java -jar app.jar > app.log 2>&1 &
-
-                                # small wait and show last log lines for quick check
                                 sleep 5
-                                echo "Tail of app.log (last 20 lines):"
+                                echo "Last lines of app.log:"
                                 tail -n 20 app.log || true
-
-                                echo "Deployment finished on remote host."
                             ENDSSH
                         """
-                    } // end sshagent
-                } // end script
-            } // end steps
-        } // end stage Deploy
-    } // end stages
+                    }
+                }
+            }
+        }
+    }
 
     post {
         success {
-            echo "✅ App deployed! Visit: http://${SERVER_IP}:8080/ (if your app serves on 8080)"
+            echo "✅ App deployed — http://${SERVER_IP}:8080/ (if app binds to 8080)"
         }
         failure {
-            echo "❌ Deployment failed. Check console output and remote server logs (app.log)."
+            echo "❌ Deployment failed — check console and remote app.log"
         }
         always {
             cleanWs()
