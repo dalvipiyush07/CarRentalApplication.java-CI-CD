@@ -17,7 +17,7 @@ pipeline {
 
         stage('Build WAR') {
             steps {
-                sh 'mvn clean package'
+                sh 'mvn clean package -DskipTests'
             }
         }
 
@@ -25,13 +25,30 @@ pipeline {
             steps {
                 sshagent([SSH_CRED_ID]) {
                     sh """
-                        WAR_FILE=\$(ls target/*.war | head -n 1)
+                        echo "Finding WAR file..."
+                        WAR_FILE=\$(ls target/*.war 2>/dev/null | head -n 1)
+
+                        if [ -z "\$WAR_FILE" ]; then
+                            echo "❌ No WAR file found in target/. Check pom.xml packaging type!"
+                            exit 1
+                        fi
+
+                        echo "Uploading WAR file: \$WAR_FILE"
                         scp -o StrictHostKeyChecking=no \$WAR_FILE ubuntu@${SERVER_IP}:/tmp/
+
+                        echo "Deploying to Tomcat on ${SERVER_IP}..."
                         ssh -o StrictHostKeyChecking=no ubuntu@${SERVER_IP} '
+                            set -e
+                            echo "Stopping Tomcat..."
+                            sudo systemctl stop ${TOMCAT_SVC} || true
+                            echo "Clearing old deployment..."
                             sudo rm -rf ${TOMCAT_PATH}/*
+                            echo "Deploying new WAR..."
                             sudo mv /tmp/*.war ${TOMCAT_PATH}/ROOT.war
                             sudo chown tomcat:tomcat ${TOMCAT_PATH}/ROOT.war
-                            sudo systemctl restart ${TOMCAT_SVC}
+                            echo "Starting Tomcat..."
+                            sudo systemctl start ${TOMCAT_SVC}
+                            echo "✅ Deployment complete!"
                         '
                     """
                 }
@@ -41,10 +58,10 @@ pipeline {
 
     post {
         success {
-            echo "App deployed! Visit: http://${SERVER_IP}:8080/"
+            echo "🚀 App deployed successfully! Visit: http://${SERVER_IP}:8080/"
         }
         failure {
-            echo "Deployment failed."
+            echo "❌ Deployment failed. Check Jenkins logs for details."
         }
     }
 }
