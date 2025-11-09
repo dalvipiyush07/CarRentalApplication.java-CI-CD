@@ -4,7 +4,7 @@ pipeline {
     environment {
         SERVER_IP    = '13.233.101.118'
         SSH_CRED_ID  = 'node-app-key'
-        DEPLOY_PATH  = '/opt/car-rental'
+        DEPLOY_PATH  = '/var/lib/tomcat/webapps/ROOT/car-rental'
         REPO_URL     = 'https://github.com/dalvipiyush07/CarRentalApplication.java-CI-CD.git'
         BRANCH       = 'main'
     }
