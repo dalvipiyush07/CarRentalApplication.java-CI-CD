@@ -2,92 +2,38 @@ pipeline {
     agent any
 
     environment {
-        SERVER_IP    = '13.233.101.118'
-        SSH_CRED_ID  = 'node-app-key'                           // Jenkins credential id for SSH key
-        DEPLOY_PATH  = '/var/lib/tomcat/webapps/ROOT/car-rental'
-        REPO_URL     = 'https://github.com/dalvipiyush07/CarRentalApplication.java-CI-CD.git'
-        BRANCH       = 'main'
-        SSH_USER     = 'ubuntu'
-        MAVEN_OPTS   = '-Xmx1g -XX:+UseG1GC'
-    }
-
-    options {
-        buildDiscarder(logRotator(numToKeepStr: '10'))
-        // intentionally NOT using timestamps() or ansiColor() to avoid plugin/version issues
+        SERVER_IP    = '13.233.201.38'
+        SSH_CRED_ID  = 'node-app-key'
+        TOMCAT_PATH  = '/var/lib/tomcat10/webapps'
+        TOMCAT_SVC   = 'tomcat10'
     }
 
     stages {
-        stage('Check Agent Tools') {
-            steps {
-                echo 'Checking for java and mvn on agent (must be installed or in PATH)'
-                sh 'java -version || true'
-                sh 'mvn -version || true'
-            }
-        }
-
         stage('Checkout') {
             steps {
-                echo "Checkout ${BRANCH} from ${REPO_URL}"
-                git branch: "${BRANCH}", url: "${REPO_URL}"
+                git branch: 'master', url: 'https://github.com/dalvipiyush07/CarRentalApplication.java-CI-CD.git'
             }
         }
 
-        stage('Build') {
+        stage('Build WAR') {
             steps {
-                echo 'Building with Maven (skip tests to speed up by default)'
-                sh 'mvn -B clean package -DskipTests'
-            }
-            post {
-                success {
-                    archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
-                }
+                sh 'mvn clean package'
             }
         }
 
-        stage('Test') {
+        stage('Deploy to Tomcat') {
             steps {
-                echo 'Running tests (non-fatal)'
-                // run tests but do not fail pipeline on non-zero; junit will still record results
-                sh 'mvn -B test || true'
-            }
-            post {
-                always {
-                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
-                }
-            }
-        }
-
-        stage('Deploy') {
-            steps {
-                script {
-                    sshagent (credentials: [env.SSH_CRED_ID]) {
-                        sh """
-                            set -e
-                            echo "Copying artifact..."
-                            scp -o StrictHostKeyChecking=no target/*.jar ${SSH_USER}@${SERVER_IP}:/tmp/
-                            echo "Deploying on remote..."
-                            ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SERVER_IP} << 'ENDSSH'
-                                set -e
-                                sudo mkdir -p ${DEPLOY_PATH}
-                                sudo chown ${SSH_USER}:${SSH_USER} ${DEPLOY_PATH} || true
-
-                                pid=\$(pgrep -f "car-rental" || true)
-                                if [ -n "\$pid" ]; then
-                                    echo "Stopping previous process \$pid"
-                                    sudo pkill -f "car-rental" || true
-                                    sleep 2
-                                fi
-
-                                sudo mv /tmp/*.jar ${DEPLOY_PATH}/app.jar
-                                sudo chown ${SSH_USER}:${SSH_USER} ${DEPLOY_PATH}/app.jar || true
-                                cd ${DEPLOY_PATH}
-                                nohup java -jar app.jar > app.log 2>&1 &
-                                sleep 5
-                                echo "Last lines of app.log:"
-                                tail -n 20 app.log || true
-                            ENDSSH
-                        """
-                    }
+                sshagent([SSH_CRED_ID]) {
+                    sh """
+                        WAR_FILE=\$(ls target/*.war | head -n 1)
+                        scp -o StrictHostKeyChecking=no \$WAR_FILE ubuntu@${SERVER_IP}:/tmp/
+                        ssh -o StrictHostKeyChecking=no ubuntu@${SERVER_IP} '
+                            sudo rm -rf ${TOMCAT_PATH}/*
+                            sudo mv /tmp/*.war ${TOMCAT_PATH}/ROOT.war
+                            sudo chown tomcat:tomcat ${TOMCAT_PATH}/ROOT.war
+                            sudo systemctl restart ${TOMCAT_SVC}
+                        '
+                    """
                 }
             }
         }
@@ -95,13 +41,10 @@ pipeline {
 
     post {
         success {
-            echo "✅ App deployed — http://${SERVER_IP}:8080/ (if app binds to 8080)"
+            echo "App deployed! Visit: http://${SERVER_IP}:8080/"
         }
         failure {
-            echo "❌ Deployment failed — check console and remote app.log"
-        }
-        always {
-            cleanWs()
+            echo "Deployment failed."
         }
     }
 }
